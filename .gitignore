@@ -1,0 +1,9 @@
+# 급여 자료는 절대 저장소에 올리지 않는다
+*.xls
+*.xlsx
+*.zip
+*.csv
+master.json
+run.json
+templates/
+20??-??/
