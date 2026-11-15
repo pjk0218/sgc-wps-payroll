@@ -1,7 +1,7 @@
 /* app.js — 화면과 저장. 급여 데이터는 이 브라우저와 선택한 공유 폴더 밖으로 나가지 않는다(서버 전송 없음). */
 (function () {
   'use strict';
-  const X = window.XlsBin, W = window.Wps, VERSION = '1.0.6';
+  const X = window.XlsBin, W = window.Wps, VERSION = '1.0.7';
   const $ = (s, el) => (el || document).querySelector(s);
   const esc = (s) => String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -169,6 +169,7 @@
   function viewRun() {
     let h = '';
     if (!window.showDirectoryPicker) h += `<div class="box warn">${t('unsupported')}</div>`;
+    if (S.store.kind !== 'folder' && window.showDirectoryPicker) h += `<div class="box new"><h3>Connect the team's shared folder first</h3>Click <b>Connect shared folder</b> (top right). In the folder window, type <code>\\\\JKPC\\WPS Payroll</code> in the <b>Folder:</b> box and click <b>Select Folder</b>, then <b>Edit files</b> / <b>Allow</b>. Do not pick a drive letter such as Z: — the browser silently refuses whole drives.</div>`;
     if (S.connectMsg) h += `<div class="box err"><h3>Shared folder not connected</h3>${esc(S.connectMsg)}<div class="small muted" style="margin-top:6px">Browser: ${esc(navigator.userAgent.match(/(Edg|Chrome)\/[\d.]+/g)?.join(' ') || navigator.userAgent)}</div></div>`;
     h += `<section class="card"><h2><span class="step">1</span>${t('s1')}</h2><div class="row">
       <label>${t('month')}<input type="month" data-act="month" value="${S.month}"></label>
