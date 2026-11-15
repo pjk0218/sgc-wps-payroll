@@ -1,7 +1,7 @@
 /* app.js — 화면과 저장. 급여 데이터는 이 브라우저와 선택한 공유 폴더 밖으로 나가지 않는다(서버 전송 없음). */
 (function () {
   'use strict';
-  const X = window.XlsBin, W = window.Wps, VERSION = '1.0.5';
+  const X = window.XlsBin, W = window.Wps, VERSION = '1.0.6';
   const $ = (s, el) => (el || document).querySelector(s);
   const esc = (s) => String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -50,7 +50,7 @@
 
   // ───────── 상태 ─────────
   const now = new Date();
-  const S = { special: {}, exportPath: '', store: localStore, pendingHandle: null, tab: 'run', master: {}, templates: {}, inputs: [], overrides: {}, addNew: {}, res: null, ack: false, prev: null, created: null,
+  const S = { connectMsg: '', special: {}, exportPath: '', store: localStore, pendingHandle: null, tab: 'run', master: {}, templates: {}, inputs: [], overrides: {}, addNew: {}, res: null, ack: false, prev: null, created: null,
     month: now.getFullYear() + '-' + pad2(now.getMonth() + 1), runDate: now.getFullYear() + '-' + pad2(now.getMonth() + 1) + '-' + pad2(now.getDate()), valueDate: W.valueDateFor(now), vdTouched: false, mq: '', mEdit: null };
   window.__wps = S;
 
@@ -68,12 +68,26 @@
   const prevMonthOf = (ym) => { const [y, m] = ym.split('-').map(Number); return m === 1 ? (y - 1) + '-12' : y + '-' + pad2(m - 1); };
   async function loadPrev() { S.prev = await readJson(prevMonthOf(S.month) + '/run.json', null); }
 
+  // 연결 실패 이유를 화면에 남긴다 (조용히 끝나지 않게)
+  function connectFail(msg) { S.connectMsg = msg; S.tab = 'run'; render(); }
   async function connectFolder(handle) {
+    S.connectMsg = '';
+    let step = 'pick';
     try {
       if (!handle) handle = await window.showDirectoryPicker({ mode: 'readwrite' });
-      if ((await handle.requestPermission({ mode: 'readwrite' })) !== 'granted') return;
+      step = 'permission';
+      const perm = await handle.requestPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') return connectFail(`The browser did not give permission to edit the folder "${handle.name}" (answer: ${perm}). Click Connect shared folder again and choose "Edit files" / "Allow". If no question appears, click the icon left of the address bar → Site settings → File editing → set to "Ask" or "Allow", then reload the page.`);
+      step = 'test';
+      // 실제로 쓰고 지울 수 있는지 확인
+      const fh = await handle.getFileHandle('.wps-write-test', { create: true }); const w = await fh.createWritable(); await w.write('ok'); await w.close(); await handle.removeEntry('.wps-write-test');
       S.store = folderStore(handle); S.pendingHandle = null; await idb.set('dirHandle', handle); await loadShared(); recompute(); render();
-    } catch (e) { if (e.name !== 'AbortError') toast(e.message); }
+      toast('Connected: ' + handle.name);
+    } catch (e) {
+      if (e.name === 'AbortError' && step === 'pick') return;
+      const why = e.name === 'SecurityError' || e.name === 'NotAllowedError' ? 'The browser or a company policy blocked access to this folder.' : e.name === 'NoModificationAllowedError' || e.name === 'InvalidModificationError' ? 'The folder is read-only for this Windows user (check the share permission is Read/Write).' : 'The folder could not be opened.';
+      connectFail(`${why} Step: ${step}. Details: ${e.name} — ${e.message}. Try choosing the folder through Network → JKPC → WPS Payroll instead of the drive letter.`);
+    }
   }
 
   // ───────── 파일 받기 ─────────
@@ -155,6 +169,7 @@
   function viewRun() {
     let h = '';
     if (!window.showDirectoryPicker) h += `<div class="box warn">${t('unsupported')}</div>`;
+    if (S.connectMsg) h += `<div class="box err"><h3>Shared folder not connected</h3>${esc(S.connectMsg)}<div class="small muted" style="margin-top:6px">Browser: ${esc(navigator.userAgent.match(/(Edg|Chrome)\/[\d.]+/g)?.join(' ') || navigator.userAgent)}</div></div>`;
     h += `<section class="card"><h2><span class="step">1</span>${t('s1')}</h2><div class="row">
       <label>${t('month')}<input type="month" data-act="month" value="${S.month}"></label>
       <label>${t('runDate')}<input type="date" data-act="runDate" value="${S.runDate}"></label>
