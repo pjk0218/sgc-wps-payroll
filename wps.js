@@ -54,7 +54,7 @@
     const cols = {}; for (let c = 0; c <= sheet.maxC; c++) { const h = get(hr, c); if (typeof h !== 'string') continue; for (const k of FIELDS) if (cols[k] === undefined && HEAD[k].test(h.trim())) { cols[k] = c; break; } }
     for (const k of FIELDS) if (cols[k] === undefined) throw new Error('Header column missing: ' + k);
     const meta = {};
-    for (let r = 0; r < hr; r++) for (let c = 0; c <= sheet.maxC; c++) { const v = get(r, c); if (typeof v !== 'string') continue; if (/value\s*date/i.test(v)) meta.valueDate = [r, c + 1]; else if (/number\s*of/i.test(v)) meta.count = [r, c + 1]; else if (/total\s*salary/i.test(v)) meta.total = [r, c + 1]; else if (/start/i.test(v) && /\(/.test(v)) meta.start = [r, c + 1]; }
+    for (let r = 0; r < hr; r++) for (let c = 0; c <= sheet.maxC; c++) { const v = get(r, c); if (typeof v !== 'string') continue; if (/value\s*date/i.test(v)) meta.valueDate = [r, c + 1]; else if (/number\s*of/i.test(v)) meta.count = [r, c + 1]; else if (/total\s*salary/i.test(v)) meta.total = [r, c + 1]; else if (/start/i.test(v) && /\(/.test(v)) meta.start = [r, c + 1]; else if (/file\s*path/i.test(v)) meta.filePath = [r, c + 1]; }
     const c0 = Math.min(...FIELDS.map((k) => cols[k])), c1 = Math.max(...FIELDS.map((k) => cols[k]));
     // 매크로는 고정 위치(C16·C18·C20·F16, A~M열)를 읽는다 → 양식이 그 위치와 맞는지
     const std = FIELDS.every((k, i) => cols[k] === i) && hr === 23 && meta.valueDate && meta.valueDate[0] === 15 && meta.valueDate[1] === 5 && meta.count && meta.count[0] === 17 && meta.count[1] === 2 && meta.total && meta.total[0] === 19 && meta.total[1] === 2;
@@ -132,7 +132,9 @@
     return { outputs, notices, desc };
   }
   // 양식 + 행 → 완성 .xls (매크로 보존)
-  function fill(templateU8, out, valueDate) {
+  /* opts.filePath: Export 매크로가 txt를 저장할 폴더(F18). 비우면 양식 값 그대로 */
+  function fill(templateU8, out, valueDate, opts) {
+    opts = opts || {};
     const sheet = X.readXls(templateU8, SHEET), lay = layout(sheet), first = lay.hr + 1, n = out.rows.length;
     // 열별 기준 서식: 양식 데이터 행에서 가장 많이 쓰인 XF
     const refXf = {}; for (let c = lay.c0; c <= lay.c1; c++) { const cnt = new Map(); for (let r = first; r <= sheet.maxR; r++) { if (sheet.cells.get(r + ',' + lay.cols.id) === undefined) continue; const x = sheet.xfs.get(r + ',' + c); if (x !== undefined) cnt.set(x, (cnt.get(x) || 0) + 1); } let best, bn = 0; for (const [x, k] of cnt) if (k > bn) { best = x; bn = k; } refXf[c] = best === undefined ? (sheet.xfs.get(first + ',' + c) ?? 15) : best; }
@@ -149,14 +151,18 @@
     if (!lay.meta.count || !lay.meta.total || !lay.meta.valueDate) throw new Error('Template header cells (number of employees / total / value date) not found');
     const putK = (p, v) => edits.set(p[0] + ',' + p[1], { r: p[0], c: p[1], v, f: 'keep' });
     putK(lay.meta.count, n); putK(lay.meta.total, out.total); put(lay.meta.valueDate[0], lay.meta.valueDate[1], String(valueDate));
+    const fp = opts.filePath ? String(opts.filePath).trim().replace(/[\\/]+$/, '') : '';
+    if (fp && lay.meta.filePath) put(lay.meta.filePath[0], lay.meta.filePath[1], fp);
     if (lay.meta.start) putK(lay.meta.start, first + 1);
     const bytes = X.patchXls(templateU8, SHEET, [...edits.values()], (r, c) => refXf[c] ?? 15);
     // 자체 검증: 만든 파일을 다시 읽어 행·합계·상단 값 확인
     const back = readEmployees(X.readXls(bytes, SHEET));
     const sum = r2(back.employees.reduce((a, e) => a + e.salary, 0));
     const ok = back.employees.length === n && Math.abs(sum - out.total) < 0.005 && back.header.count === n && Math.abs(back.header.total - out.total) < 0.005 && String(back.header.valueDate) === String(valueDate) && back.employees.every((e, i) => e.id === out.rows[i].id && cleanIban(e.iban) === cleanIban(out.rows[i].iban) && Math.abs(e.salary - out.rows[i].salary) < 1e-9);
+    const fpOk = !(fp && lay.meta.filePath) || X.readXls(bytes, SHEET).cells.get(lay.meta.filePath[0] + ',' + lay.meta.filePath[1]) === fp;
+    if (!fpOk) throw new Error(`Self-check failed (${out.key}): File Path cell was not written. Nothing was saved`);
     if (!ok) throw new Error(`Self-check failed (${out.key}): the created file does not match the calculated values. Nothing was saved`);
-    return { bytes, macroStandard: lay.macroStandard, info: bytes.info, salaryIsFormula, check: { count: back.employees.length, total: sum } };
+    return { bytes, filePath: fp && lay.meta.filePath ? fp : '', macroStandard: lay.macroStandard, info: bytes.info, salaryIsFormula, check: { count: back.employees.length, total: sum } };
   }
   // 매크로(Export 버튼)가 만들 은행 텍스트 본문을 미리 계산 — 대조·검증용
   function macroPreview(xlsU8) {

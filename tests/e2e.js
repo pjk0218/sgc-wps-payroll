@@ -12,6 +12,8 @@ const srv=http.createServer((q,s)=>{ const f=path.join('/home/claude/app',q.url=
   console.log('마스터:',await p.evaluate(()=>Object.keys(window.__wps.master).length),'명');
   const sp=JSON.parse(fs.readFileSync('/home/claude/secret-special.json','utf8'));
   for(const [id,k] of Object.entries(sp)){ await p.fill('#sp_id',id); await p.selectOption('#sp_out',k); await p.click('button[data-act="spAdd"]'); await p.waitForTimeout(300); }
+  await p.click('nav button[data-tab="tpl"]'); await p.fill('#exp_path','Z:\\{month}\\Accounting'); await p.click('button[data-act="expSave"]'); await p.waitForTimeout(300);
+  console.log('Export 폴더 설정:',await p.evaluate(()=>window.__wps.exportPath));
   console.log('별도 파일 대상자:',await p.evaluate(()=>Object.keys(window.__wps.special).length),'명');
   await p.click('nav button[data-tab="run"]');
   await p.fill('input[data-act="month"]','2026-10'); await p.dispatchEvent('input[data-act="month"]','change');
@@ -37,6 +39,6 @@ const srv=http.createServer((q,s)=>{ const f=path.join('/home/claude/app',q.url=
   for(const [n,d] of Object.entries(files)){ const k=W.detectTemplate(n); const ref=ACC+fs.readdirSync(ACC).find(f=>{let kk=W.detectTemplate(f); if(/^05\.1/.test(f)) kk='pdh-trainee'; return kk===k;});
     const a=W.readEmployees(X.readXls(new Uint8Array(fs.readFileSync(ref)),W.SHEET)), c=W.readEmployees(X.readXls(d,W.SHEET));
     const same=a.employees.length===c.employees.length&&a.employees.every((e,i)=>e.id===c.employees[i].id&&e.iban===c.employees[i].iban&&Math.abs(e.salary-c.employees[i].salary)<1e-9&&Math.abs(e.basic-c.employees[i].basic)<1e-9&&Math.abs(e.deduction-c.employees[i].deduction)<1e-9)&&a.header.total===c.header.total&&String(a.header.valueDate)===String(c.header.valueDate)&&a.header.count===c.header.count;
-    if(!same) bad++; console.log(' ',same?'일치':'불일치',n,c.employees.length,'명',c.header.total); }
+    if(!same) bad++; const f18=X.readXls(d,W.SHEET).cells.get('17,5'); console.log(' ',same?'일치':'불일치',n.slice(0,40),c.employees.length,'명',c.header.total,'F18=',f18); }
   console.log('브라우저 산출물 vs 회계팀 최종본(사번·IBAN·금액·합계·인원·Value Date):',bad?bad+'개 불일치':'8개 모두 일치');
 })().catch(e=>{console.error('E2E 실패',e);process.exit(1);});

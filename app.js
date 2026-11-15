@@ -1,7 +1,7 @@
 /* app.js — 화면과 저장. 급여 데이터는 이 브라우저와 선택한 공유 폴더 밖으로 나가지 않는다(서버 전송 없음). */
 (function () {
   'use strict';
-  const X = window.XlsBin, W = window.Wps, VERSION = '1.0.4';
+  const X = window.XlsBin, W = window.Wps, VERSION = '1.0.5';
   const $ = (s, el) => (el || document).querySelector(s);
   const esc = (s) => String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -50,7 +50,7 @@
 
   // ───────── 상태 ─────────
   const now = new Date();
-  const S = { special: {}, store: localStore, pendingHandle: null, tab: 'run', master: {}, templates: {}, inputs: [], overrides: {}, addNew: {}, res: null, ack: false, prev: null, created: null,
+  const S = { special: {}, exportPath: '', store: localStore, pendingHandle: null, tab: 'run', master: {}, templates: {}, inputs: [], overrides: {}, addNew: {}, res: null, ack: false, prev: null, created: null,
     month: now.getFullYear() + '-' + pad2(now.getMonth() + 1), runDate: now.getFullYear() + '-' + pad2(now.getMonth() + 1) + '-' + pad2(now.getDate()), valueDate: W.valueDateFor(now), vdTouched: false, mq: '', mEdit: null };
   window.__wps = S;
 
@@ -59,7 +59,7 @@
 
   async function loadShared() {
     S.master = await readJson('master.json', {});
-    S.special = (await readJson('settings.json', {})).special || {};
+    const st = await readJson('settings.json', {}); S.special = st.special || {}; S.exportPath = st.exportPath || '';
     S.templates = {};
     for (const o of W.OUTPUTS) { const u = await S.store.read('templates/' + o.key + '.xls'); if (u) { try { S.templates[o.key] = tplInfo(u); } catch (e) { S.templates[o.key] = { error: e.message }; } } }
     await loadPrev();
@@ -123,7 +123,7 @@
   async function createFiles() {
     const r = S.res, files = []; const dir = S.month;
     try {
-      for (const o of r.outputs) { const f = W.fill(S.templates[o.key].bytes, o, S.valueDate); files.push({ name: o.fileName, data: f.bytes, key: o.key, count: f.check.count, total: f.check.total }); }
+      for (const o of r.outputs) { const f = W.fill(S.templates[o.key].bytes, o, S.valueDate, { filePath: S.exportPath ? S.exportPath.replace(/\{month\}/gi, S.month) : '' }); files.push({ name: o.fileName, data: f.bytes, key: o.key, count: f.check.count, total: f.check.total }); }
       for (const i of S.inputs) await S.store.write(dir + '/HR/' + i.fileName, i.data);
       for (const f of files) await S.store.write(dir + '/Accounting/' + f.name, f.data);
       // 마스터 반영: 체크된 신규 인원, HR 계좌로 바꾸기로 한 사람
@@ -213,8 +213,14 @@
       <tr><td><input class="cell mono" id="sp_id" maxlength="10" placeholder="10-digit ID" style="width:120px"></td><td></td><td><select id="sp_out">${opts}</select></td><td><button class="link" data-act="spAdd">Add</button></td></tr></table></section>`;
   }
   async function saveSpecial(fn) { const cur = await readJson('settings.json', {}); cur.special = cur.special || {}; fn(cur.special); await writeJson('settings.json', cur); S.special = cur.special; recompute(); render(); }
+  function exportPathCard() {
+    const ex = S.exportPath ? S.exportPath.replace(/\{month\}/gi, S.month) : '';
+    return `<section class="card"><h2>Export folder (cell F18)</h2><p class="hint">The Export macro saves the bank text file in the folder written in cell F18. Set it once for the team; <code>{month}</code> becomes the payroll month. Leave empty to keep the template's own path. Example: <code>Z:\{month}\Accounting</code></p>
+      <div class="row"><input type="text" id="exp_path" value="${esc(S.exportPath)}" placeholder="Z:\{month}\Accounting" style="min-width:320px;font-family:Consolas,monospace"><button class="btn" data-act="expSave">Save</button></div>
+      ${ex ? `<p class="small muted" style="margin-top:8px">This month's files get F18 = <code>${esc(ex)}</code> (the D360 bank file has no F18 and is left as is).</p>` : ''}</section>`;
+  }
   function viewTpl() {
-    let h = `<section class="card"><h2>${t('tTitle')}</h2><p class="hint">${t('tHint')}</p><div class="drop" data-drop="tpl">${t('dropTpl')}<input type="file" multiple accept=".xls,.zip" class="hide" data-file="tpl"></div><table style="margin-top:14px"><tr><th>${t('out')}</th><th>${t('tpl')}</th><th class="n">${t('tPeople')}</th><th></th></tr>`;
+    let h = exportPathCard() + `<section class="card"><h2>${t('tTitle')}</h2><p class="hint">${t('tHint')}</p><div class="drop" data-drop="tpl">${t('dropTpl')}<input type="file" multiple accept=".xls,.zip" class="hide" data-file="tpl"></div><table style="margin-top:14px"><tr><th>${t('out')}</th><th>${t('tpl')}</th><th class="n">${t('tPeople')}</th><th></th></tr>`;
     for (const o of W.OUTPUTS) { const tp = S.templates[o.key]; h += `<tr><td><b>${esc(o.label)}</b></td><td>${!tp ? `<span class="tag err">${t('tplMissing')}</span>` : tp.error ? `<span class="tag err">${esc(tp.error)}</span>` : tp.std ? `<span class="tag ok">${t('tStd')}</span>` : `<span class="tag warn">${t('tplOdd')}</span><div class="small" style="max-width:520px;margin-top:4px">${t('tOddMsg')}</div>`}</td><td class="n">${tp && tp.bytes ? tp.rows : ''}</td><td><button class="link" data-pick="tpl1" data-key="${o.key}">${t('tUpload')}</button></td></tr>`; }
     return h + `</table><input type="file" accept=".xls" class="hide" data-file="tpl1"></section>`;
   }
@@ -249,6 +255,7 @@
     else if (a === 'dlAll') download(`WPS_${S.created.dir}.zip`, X.zipStore(S.created.files.map((f) => ({ name: f.name, data: f.data }))), 'application/zip');
     else if (a === 'hdl') { const u = await S.store.read(el.dataset.p); if (u) download(el.dataset.p.split('/').pop(), u, 'application/vnd.ms-excel'); }
     else if (a === 'mExport') { const lines = ['ID,Name,Bank,IBAN'].concat(Object.keys(S.master).map((id) => [id, S.master[id].name, S.master[id].bank, S.master[id].iban].map((v) => '"' + String(v || '').replace(/"/g, '""') + '"').join(','))); download('master.csv', te.encode('﻿' + lines.join('\r\n')), 'text/csv'); }
+    else if (a === 'expSave') { const v = $('#exp_path').value.trim(); const cur = await readJson('settings.json', {}); cur.exportPath = v; await writeJson('settings.json', cur); S.exportPath = v; toast('Export folder saved.'); render(); }
     else if (a === 'spAdd') { const id = $('#sp_id').value.trim(), k = $('#sp_out').value; if (!/^\d{10}$/.test(id)) return toast(t('idBad')); await saveSpecial((sp) => { sp[id] = k; }); }
     else if (a === 'spDel') { const id = el.dataset.id; await saveSpecial((sp) => { delete sp[id]; }); }
     else if (a === 'mAdd') { S.mEdit = ''; render(); }
