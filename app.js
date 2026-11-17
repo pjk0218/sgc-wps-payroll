@@ -1,7 +1,7 @@
 /* app.js — 화면과 저장. 급여 데이터는 이 브라우저와 선택한 공유 폴더 밖으로 나가지 않는다(서버 전송 없음). */
 (function () {
   'use strict';
-  const X = window.XlsBin, W = window.Wps, VERSION = '1.1.0';
+  const X = window.XlsBin, W = window.Wps, VERSION = '1.1.1';
   const $ = (s, el) => (el || document).querySelector(s);
   const esc = (s) => String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -52,7 +52,7 @@
 
   // ───────── 상태 ─────────
   const now = new Date();
-  const S = { live: null, lastChange: null, viewingHist: false, histSel: {}, pendingRender: false, hrCache: {}, connectMsg: '', special: {}, exportPath: '', store: localStore, pendingHandle: null, tab: 'run', master: {}, templates: {}, inputs: [], overrides: {}, addNew: {}, res: null, ack: false, prev: null, created: null,
+  const S = { tplMsg: [], live: null, lastChange: null, viewingHist: false, histSel: {}, pendingRender: false, hrCache: {}, connectMsg: '', special: {}, exportPath: '', store: localStore, pendingHandle: null, tab: 'run', master: {}, templates: {}, inputs: [], overrides: {}, addNew: {}, res: null, ack: false, prev: null, created: null,
     month: now.getFullYear() + '-' + pad2(now.getMonth() + 1), runDate: now.getFullYear() + '-' + pad2(now.getMonth() + 1) + '-' + pad2(now.getDate()), valueDate: W.valueDateFor(now), vdTouched: false, mq: '', mEdit: null };
   window.__wps = S;
   const CLIENT = Math.random().toString(36).slice(2, 10);
@@ -116,13 +116,23 @@
     }
     if (added.length) await editDraft((d) => { for (const a of added) { d.inputs = d.inputs.filter((i) => i.fileName !== a.fileName); d.inputs.push(a); } d.created = null; });
   }
+  // 은행 양식 검사: 회계팀 최종본은 상단 인원수·합계가 행과 맞고, 매크로가 읽는 표준 위치를 쓴다.
+  // HR 원본은 상단 값이 맞지 않거나(예: 186명, 2024년 Value Date) 열 위치가 달라서 걸러진다.
+  function templateProblem(u8) {
+    const sh = X.readXls(u8, W.SHEET), lay = W.layout(sh), r = W.readEmployees(sh, lay), n = r.employees.length;
+    const sum = W.r2(r.employees.reduce((a, e) => a + e.salary, 0)), hc = Number(r.header.count), ht = Number(r.header.total);
+    if (!lay.macroStandard) return 'its columns or header cells are not where the Export macro reads them (salary must be in column E, value date in F16)';
+    if (hc !== n || Math.abs(ht - sum) > 0.01) return `its header says ${r.header.count} employees / total ${r.header.total}, but the sheet has ${n} rows / total ${sum} — this looks like an HR file, not the accounting team's final bank file`;
+    return '';
+  }
   async function addTemplates(fileList, forceKey) {
-    let n = 0;
+    let n = 0; const bad = [];
     for (const f of await expand(fileList)) {
-      const key = forceKey || W.detectTemplate(f.name); if (!key) { toast(t('tplUnknown', f.name)); continue; }
-      try { const info = tplInfo(f.data); await S.store.write('templates/' + key + '.xls', f.data); S.templates[key] = info; n++; } catch (e) { toast(t('readFail', f.name, e.message)); }
+      const key = forceKey || W.detectTemplate(f.name); if (!key) { bad.push(`${f.name}: could not tell which output this file is for`); continue; }
+      try { const why = templateProblem(f.data); if (why) { bad.push(`${f.name} was NOT registered: ${why}.`); continue; }
+        const info = tplInfo(f.data); await S.store.write('templates/' + key + '.xls', f.data); S.templates[key] = info; n++; } catch (e) { bad.push(`${f.name}: ${e.message}`); }
     }
-    if (n) toast(t('tplSaved', n)); recompute(); render();
+    S.tplMsg = bad; if (n) toast(t('tplSaved', n)); recompute(); render();
   }
   async function importMaster(fileList) {
     for (const f of await expand(fileList)) {
@@ -304,7 +314,7 @@
       ${ex ? `<p class="small muted" style="margin-top:8px">This month's files get F18 = <code>${esc(ex)}</code> (the D360 bank file has no F18 and is left as is).</p>` : ''}</section>`;
   }
   function viewTpl() {
-    let h = exportPathCard() + `<section class="card"><h2>${t('tTitle')}</h2><p class="hint">${t('tHint')}</p><div class="drop" data-drop="tpl">${t('dropTpl')}<input type="file" multiple accept=".xls,.zip" class="hide" data-file="tpl"></div><table style="margin-top:14px"><tr><th>${t('out')}</th><th>${t('tpl')}</th><th class="n">${t('tPeople')}</th><th></th></tr>`;
+    let h = exportPathCard() + `<section class="card"><h2>${t('tTitle')}</h2><p class="hint">${t('tHint')} <b>Use the accounting team's final bank files only, never the HR files.</b></p>${(S.tplMsg || []).length ? `<div class="box err"><h3>Some files were not registered</h3><ul>${S.tplMsg.map((m) => `<li>${esc(m)}</li>`).join('')}</ul></div>` : ''}<div class="drop" data-drop="tpl">${t('dropTpl')}<input type="file" multiple accept=".xls,.zip" class="hide" data-file="tpl"></div><table style="margin-top:14px"><tr><th>${t('out')}</th><th>${t('tpl')}</th><th class="n">${t('tPeople')}</th><th></th></tr>`;
     for (const o of W.OUTPUTS) { const tp = S.templates[o.key]; h += `<tr><td><b>${esc(o.label)}</b></td><td>${!tp ? `<span class="tag err">${t('tplMissing')}</span>` : tp.error ? `<span class="tag err">${esc(tp.error)}</span>` : tp.std ? `<span class="tag ok">${t('tStd')}</span>` : `<span class="tag warn">${t('tplOdd')}</span><div class="small" style="max-width:520px;margin-top:4px">${t('tOddMsg')}</div>`}</td><td class="n">${tp && tp.bytes ? tp.rows : ''}</td><td><button class="link" data-pick="tpl1" data-key="${o.key}">${t('tUpload')}</button></td></tr>`; }
     return h + `</table><input type="file" accept=".xls" class="hide" data-file="tpl1"></section>`;
   }
@@ -362,9 +372,9 @@
     else if (a === 'dlAll') { const list = []; for (const f of S.created.files) { const u = await S.store.read(S.month + '/Accounting/' + f.name); if (u) list.push({ name: f.name, data: u }); } download(`WPS_${S.month}.zip`, X.zipStore(list), 'application/zip'); }
     else if (a === 'hdl') { const u = await S.store.read(el.dataset.p); if (u) download(el.dataset.p.split('/').pop(), u, 'application/vnd.ms-excel'); }
     else if (a === 'mExport') { const lines = ['ID,Name,Bank,IBAN'].concat(Object.keys(S.master).map((id) => [id, S.master[id].name, S.master[id].bank, S.master[id].iban].map((v) => '"' + String(v || '').replace(/"/g, '""') + '"').join(','))); download('master.csv', te.encode('﻿' + lines.join('\r\n')), 'text/csv'); }
-    else if (a === 'expSave') { const v = $('#exp_path').value.trim(); const cur = await readJson('settings.json', {}); cur.exportPath = v; await writeJson('settings.json', cur); S.exportPath = v; toast('Export folder saved.'); render(); }
+    else if (a === 'expSave') { const v = $('#exp_path').value.trim(); if (!v && S.exportPath && !confirm('Clear the Export folder for the whole team? Cell F18 will then keep the path saved in each template.')) return; const cur = await readJson('settings.json', {}); cur.exportPath = v; await writeJson('settings.json', cur); S.exportPath = v; toast('Export folder saved.'); render(); }
     else if (a === 'spAdd') { const id = $('#sp_id').value.trim(), k = $('#sp_out').value; if (!/^\d{10}$/.test(id)) return toast(t('idBad')); await saveSpecial((sp) => { sp[id] = k; }); }
-    else if (a === 'spDel') { const id = el.dataset.id; await saveSpecial((sp) => { delete sp[id]; }); }
+    else if (a === 'spDel') { const id = el.dataset.id; if (!confirm(`Remove ${(S.master[id] || {}).name || id} from "Always in a separate file" for the whole team?\n\nFrom now on this person goes into the main file of their HR project.`)) return; await saveSpecial((sp) => { delete sp[id]; }); }
     else if (a === 'mAdd') { S.mEdit = ''; render(); }
     else if (a === 'mEdit') { S.mEdit = el.dataset.id; render(); }
     else if (a === 'mCancel') { S.mEdit = null; render(); }
