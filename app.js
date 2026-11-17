@@ -1,7 +1,7 @@
 /* app.js — 화면과 저장. 급여 데이터는 이 브라우저와 선택한 공유 폴더 밖으로 나가지 않는다(서버 전송 없음). */
 (function () {
   'use strict';
-  const X = window.XlsBin, W = window.Wps, VERSION = '1.0.7';
+  const X = window.XlsBin, W = window.Wps, VERSION = '1.1.0';
   const $ = (s, el) => (el || document).querySelector(s);
   const esc = (s) => String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -36,13 +36,15 @@
   const localStore = { kind: 'local', name: '',
     async read(p) { const v = await idb.get('f:' + p); return v ? new Uint8Array(v) : null; },
     async write(p, u8) { await idb.set('f:' + p, u8); },
-    async list(dir) { const pre = 'f:' + (dir ? dir + '/' : ''); const set = new Set(); for (const k of await idb.keys()) if (typeof k === 'string' && k.startsWith(pre)) set.add(k.slice(pre.length).split('/')[0]); return [...set].sort(); } };
+    async list(dir) { const pre = 'f:' + (dir ? dir + '/' : ''); const set = new Set(); for (const k of await idb.keys()) if (typeof k === 'string' && k.startsWith(pre)) set.add(k.slice(pre.length).split('/')[0]); return [...set].sort(); },
+    async remove(p) { const pre = 'f:' + p; for (const k of await idb.keys()) if (typeof k === 'string' && (k === pre || k.startsWith(pre + '/'))) await idb.del(k); } };
   function folderStore(root) {
     const dirOf = async (parts, create) => { let d = root; for (const p of parts) d = await d.getDirectoryHandle(p, { create }); return d; };
     return { kind: 'folder', name: root.name,
       async read(p) { try { const parts = p.split('/'), f = parts.pop(); const d = await dirOf(parts, false); const h = await d.getFileHandle(f); return new Uint8Array(await (await h.getFile()).arrayBuffer()); } catch (e) { if (e.name === 'NotFoundError' || e.name === 'TypeMismatchError') return null; throw e; } },
       async write(p, u8) { const parts = p.split('/'), f = parts.pop(); const d = await dirOf(parts, true); const h = await d.getFileHandle(f, { create: true }); const w = await h.createWritable(); await w.write(u8); await w.close(); },
-      async list(dir) { try { const d = await dirOf(dir ? dir.split('/') : [], false); const out = []; for await (const [n] of d.entries()) out.push(n); return out.sort(); } catch (e) { return []; } } };
+      async list(dir) { try { const d = await dirOf(dir ? dir.split('/') : [], false); const out = []; for await (const [n] of d.entries()) out.push(n); return out.sort(); } catch (e) { return []; } },
+      async remove(p) { const parts = p.split('/'), f = parts.pop(); try { const d = await dirOf(parts, false); await d.removeEntry(f, { recursive: true }); } catch (e) { if (e.name !== 'NotFoundError') throw e; } } };
   }
   const te = new TextEncoder(), td = new TextDecoder();
   const readJson = async (p, dflt) => { const u = await S.store.read(p); if (!u) return dflt; try { return JSON.parse(td.decode(u)); } catch (e) { return dflt; } };
@@ -50,9 +52,11 @@
 
   // ───────── 상태 ─────────
   const now = new Date();
-  const S = { connectMsg: '', special: {}, exportPath: '', store: localStore, pendingHandle: null, tab: 'run', master: {}, templates: {}, inputs: [], overrides: {}, addNew: {}, res: null, ack: false, prev: null, created: null,
+  const S = { live: null, lastChange: null, viewingHist: false, histSel: {}, pendingRender: false, hrCache: {}, connectMsg: '', special: {}, exportPath: '', store: localStore, pendingHandle: null, tab: 'run', master: {}, templates: {}, inputs: [], overrides: {}, addNew: {}, res: null, ack: false, prev: null, created: null,
     month: now.getFullYear() + '-' + pad2(now.getMonth() + 1), runDate: now.getFullYear() + '-' + pad2(now.getMonth() + 1) + '-' + pad2(now.getDate()), valueDate: W.valueDateFor(now), vdTouched: false, mq: '', mEdit: null };
   window.__wps = S;
+  const CLIENT = Math.random().toString(36).slice(2, 10);
+  let userName = localStorage.getItem('wps.user') || '';
 
   function toast(msg) { const el = $('#toast'); el.textContent = msg; el.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('on'), 3500); }
   function download(name, u8, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([u8], { type: type || 'application/octet-stream' })); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000); }
@@ -81,7 +85,8 @@
       step = 'test';
       // 실제로 쓰고 지울 수 있는지 확인
       const fh = await handle.getFileHandle('.wps-write-test', { create: true }); const w = await fh.createWritable(); await w.write('ok'); await w.close(); await handle.removeEntry('.wps-write-test');
-      S.store = folderStore(handle); S.pendingHandle = null; await idb.set('dirHandle', handle); await loadShared(); recompute(); render();
+      S.store = folderStore(handle); S.pendingHandle = null; await idb.set('dirHandle', handle); await loadShared(); S.hrCache = {};
+      const live = await readJson('live.json', null); S.live = live; await openMonth(live && live.month ? live.month : S.month);
       toast('Connected: ' + handle.name);
     } catch (e) {
       if (e.name === 'AbortError' && step === 'pick') return;
@@ -101,11 +106,15 @@
     return out;
   }
   async function addHr(fileList) {
+    const added = [];
     for (const f of await expand(fileList)) {
-      try { const sh = await X.readAny(f.data, W.SHEET); const { employees, header } = W.readEmployees(sh); S.inputs = S.inputs.filter((i) => i.fileName !== f.name); S.inputs.push({ fileName: f.name, data: f.data, output: W.detectOutput(f.name), employees, header }); }
+      try { const sh = await X.readAny(f.data, W.SHEET); const { employees, header } = W.readEmployees(sh);
+        await S.store.write(S.month + '/HR/' + f.name, f.data);
+        S.hrCache[S.month + '/' + f.name + '/' + f.data.length] = { fileName: f.name, data: f.data, employees, header };
+        added.push({ fileName: f.name, output: W.detectOutput(f.name), size: f.data.length }); }
       catch (e) { toast(t('readFail', f.name, e.message)); }
     }
-    S.created = null; recompute(); render();
+    if (added.length) await editDraft((d) => { for (const a of added) { d.inputs = d.inputs.filter((i) => i.fileName !== a.fileName); d.inputs.push(a); } d.created = null; });
   }
   async function addTemplates(fileList, forceKey) {
     let n = 0;
@@ -127,6 +136,60 @@
   // 마스터 변경은 항상 최신 파일을 다시 읽어 그 위에 적용(여러 사람이 동시에 써도 덮어쓰지 않도록)
   async function masterApply(fn) { const cur = await readJson('master.json', {}); fn(cur); await writeJson('master.json', cur); S.master = cur; }
 
+  // ───────── 공유 작업 상태: <월>/draft.json + live.json ─────────
+  // 한 사람이 바꾸면 공유 폴더에 바로 저장하고, 다른 사람 화면은 3초마다 확인해서 따라간다.
+  const emptyDraft = (month) => ({ month, runDate: S.runDate, valueDate: S.valueDate, inputs: [], overrides: {}, addNew: {}, ack: false, created: null, rev: 0 });
+  async function readDraft(month) {
+    const d = await readJson(month + '/draft.json', null); if (d) return d;
+    const log = await readJson(month + '/run.json', null); if (!log) return null;   // 예전 방식으로 저장된 달
+    return { month, runDate: S.runDate, valueDate: log.valueDate, inputs: (log.inputs || []).map((i) => ({ fileName: i.fileName, output: i.output })), overrides: {}, addNew: {}, ack: false, rev: 0,
+      created: { at: log.createdAt, by: log.createdBy || '', files: log.outputs.map((o) => ({ name: o.fileName, count: o.count, total: o.total })), added: 0 } };
+  }
+  async function hrInput(month, e) {
+    const key = month + '/' + e.fileName + '/' + (e.size || '');
+    if (!S.hrCache[key]) { const u = await S.store.read(month + '/HR/' + e.fileName); if (!u) return null; const { employees, header } = W.readEmployees(await X.readAny(u, W.SHEET)); S.hrCache[key] = { fileName: e.fileName, data: u, employees, header }; }
+    return Object.assign({}, S.hrCache[key], { output: e.output });
+  }
+  async function applyDraft(d) {
+    // HR 파일을 먼저 다 읽은 뒤 화면 상태를 한 번에 바꾼다 (반쯤 바뀐 화면이 보이지 않게)
+    const ins = []; for (const e of d.inputs || []) { try { const i = await hrInput(d.month, e); if (i) ins.push(i); } catch (err) { toast(t('readFail', e.fileName, err.message)); } }
+    S.month = d.month; S.draftRev = d.rev || 0;
+    if (d.runDate) S.runDate = d.runDate; if (d.valueDate) S.valueDate = d.valueDate;
+    S.overrides = d.overrides || {}; S.addNew = d.addNew || {}; S.ack = !!d.ack; S.created = d.created || null;
+    S.inputs = ins; S.lastChange = d.by ? { by: d.by, at: d.at } : null;
+    await loadPrev(); recompute(); safeRender();
+  }
+  // 저장·불러오기는 한 번에 하나씩 (빠르게 연달아 바꿔도 서로 덮어쓰지 않게)
+  let chain = Promise.resolve();
+  const serial = (fn) => { const r = chain.then(fn, fn); chain = r.catch(() => {}); return r; };
+  const openMonth = (month) => serial(() => openMonthNow(month));
+  async function openMonthNow(month) { S.hrCache = {}; const d = await readDraft(month); await applyDraft(d || emptyDraft(month)); }
+  // 모든 변경은 '최신 draft를 다시 읽고 → 바꾸고 → 저장' (두 사람이 동시에 바꿔도 서로 지우지 않게)
+  const editDraft = (fn) => serial(() => editDraftNow(fn));
+  async function editDraftNow(fn) {
+    const d = (await readJson(S.month + '/draft.json', null)) || (await readDraft(S.month)) || emptyDraft(S.month);
+    d.month = S.month; fn(d); d.rev = (d.rev || 0) + 1; d.by = userName || 'Someone'; d.client = CLIENT; d.at = new Date().toISOString();
+    await writeJson(S.month + '/draft.json', d);
+    const live = { month: S.month, rev: Date.now() + '-' + CLIENT, by: d.by, client: CLIENT, at: d.at };
+    await writeJson('live.json', live); S.live = live; S.viewingHist = false;
+    await applyDraft(d);
+  }
+  const poll = () => serial(pollNow);
+  async function pollNow() {
+    try {
+      const live = await readJson('live.json', null);
+      if (!live || (S.live && live.rev === S.live.rev)) return;
+      S.live = live;
+      if (live.client === CLIENT) return;
+      S.master = await readJson('master.json', S.master);
+      const st = await readJson('settings.json', {}); S.special = st.special || {}; S.exportPath = st.exportPath || '';
+      if (live.month === S.month || !S.viewingHist) { await openMonthNow(live.month); toast(`${live.by} updated ${live.month}`); }
+      else safeRender();
+    } catch (e) { /* 네트워크가 잠시 끊겨도 다음 확인 때 다시 시도 */ }
+  }
+  // 입력 중인 칸이 있으면 화면을 바로 다시 그리지 않고, 칸을 벗어날 때 그린다
+  function safeRender() { const a = document.activeElement; if (a && a.matches && a.matches('main input[type=text], main input.cell, main input[type=search]')) { S.pendingRender = true; return; } render(); }
+
   function recompute() {
     const [y, m] = S.month.split('-').map(Number);
     const act = S.inputs.filter((i) => i.output !== 'ignore');
@@ -138,24 +201,26 @@
     const r = S.res, files = []; const dir = S.month;
     try {
       for (const o of r.outputs) { const f = W.fill(S.templates[o.key].bytes, o, S.valueDate, { filePath: S.exportPath ? S.exportPath.replace(/\{month\}/gi, S.month) : '' }); files.push({ name: o.fileName, data: f.bytes, key: o.key, count: f.check.count, total: f.check.total }); }
-      for (const i of S.inputs) await S.store.write(dir + '/HR/' + i.fileName, i.data);
       for (const f of files) await S.store.write(dir + '/Accounting/' + f.name, f.data);
       // 마스터 반영: 체크된 신규 인원, HR 계좌로 바꾸기로 한 사람
       const adds = [], upds = [];
       for (const o of r.outputs) for (const row of o.rows) { if (!row.inMaster && S.addNew[row.id] !== false) adds.push(row); else if (row.inMaster && (S.overrides[row.id] || {}).useHr) upds.push(row); }
       if (adds.length || upds.length) await masterApply((cur) => { for (const x of adds) cur[x.id] = { name: x.name, bank: x.bank, iban: x.iban, added: S.month }; for (const x of upds) cur[x.id] = Object.assign({}, cur[x.id], { bank: x.bank, iban: x.iban, updated: S.month }); });
-      const log = { version: VERSION, month: S.month, valueDate: S.valueDate, createdAt: new Date().toISOString(), grandTotal: W.r2(r.outputs.reduce((a, o) => a + o.total, 0)),
+      const log = { version: VERSION, month: S.month, valueDate: S.valueDate, createdAt: new Date().toISOString(), createdBy: userName || '', grandTotal: W.r2(r.outputs.reduce((a, o) => a + o.total, 0)),
         inputs: S.inputs.map((i) => ({ fileName: i.fileName, output: i.output, count: i.employees.length })),
         outputs: r.outputs.map((o) => ({ key: o.key, label: o.label, fileName: o.fileName, count: o.count, total: o.total, people: o.rows.map((x) => ({ id: x.id, name: x.name, salary: x.salary })) })),
         notices: r.notices.map((n) => ({ level: n.level, type: n.type, output: n.output, id: n.id, name: n.name, msg: n.msg })) };
       await writeJson(dir + '/run.json', log);
-      S.created = { files, added: adds.length, dir }; S.overrides = {}; S.addNew = {}; recompute(); render();
+      const created = { at: log.createdAt, by: userName || '', added: adds.length, files: files.map((f) => ({ name: f.name, count: f.count, total: f.total })) };
+      S.master = await readJson('master.json', S.master);
+      await editDraft((d) => { d.created = created; d.overrides = {}; d.addNew = {}; d.ack = false; });
     } catch (e) { toast(e.message); console.error(e); }
   }
 
   // ───────── 화면 ─────────
   function render() {
     document.documentElement.lang = lang;
+    const un = $('#userName'); if (un && document.activeElement !== un) un.value = userName;
     $('#storeInfo').innerHTML = S.store.kind === 'folder' ? t('folderOn', esc(S.store.name)) : t('folderNone');
     $('#btnFolder').textContent = S.pendingHandle ? t('reconnect') : S.store.kind === 'folder' ? t('change') : t('connect');
     $('#btnFolder').classList.toggle('hide', !window.showDirectoryPicker);
@@ -171,6 +236,8 @@
     if (!window.showDirectoryPicker) h += `<div class="box warn">${t('unsupported')}</div>`;
     if (S.store.kind !== 'folder' && window.showDirectoryPicker) h += `<div class="box new"><h3>Connect the team's shared folder first</h3>Click <b>Connect shared folder</b> (top right). In the folder window, type <code>\\\\JKPC\\WPS Payroll</code> in the <b>Folder:</b> box and click <b>Select Folder</b>, then <b>Edit files</b> / <b>Allow</b>. Do not pick a drive letter such as Z: — the browser silently refuses whole drives.</div>`;
     if (S.connectMsg) h += `<div class="box err"><h3>Shared folder not connected</h3>${esc(S.connectMsg)}<div class="small muted" style="margin-top:6px">Browser: ${esc(navigator.userAgent.match(/(Edg|Chrome)\/[\d.]+/g)?.join(' ') || navigator.userAgent)}</div></div>`;
+    if (S.viewingHist) h += `<div class="box new">Viewing saved month <b>${esc(S.month)}</b> from History. Changes you make here are saved to this month and shown to the team. ${S.live && S.live.month !== S.month ? `<button class="link" data-act="goLive">Go to the month the team is working on (${esc(S.live.month)})</button>` : ''}</div>`;
+    if (S.lastChange) h += `<p class="small muted" style="margin:0 0 10px">Shared with the team · last change by <b>${esc(S.lastChange.by)}</b> at ${esc((S.lastChange.at || '').slice(0, 16).replace('T', ' '))} · screens update every 3 seconds</p>`;
     h += `<section class="card"><h2><span class="step">1</span>${t('s1')}</h2><div class="row">
       <label>${t('month')}<input type="month" data-act="month" value="${S.month}"></label>
       <label>${t('runDate')}<input type="date" data-act="runDate" value="${S.runDate}"></label>
@@ -208,8 +275,9 @@
     return h + createdBox();
   }
   function createdBox() {
-    if (!S.created) return ''; const c = S.created;
-    return `<section class="card"><div class="box ok"><h3>${t('done', esc((S.store.kind === 'folder' ? S.store.name + '/' : '') + c.dir + '/Accounting'))}</h3>${t('selfOk')}${c.added ? '<br>' + t('masterAdded', c.added) : ''}</div><table><tr><th>${t('file')}</th><th class="n">${t('people')}</th><th class="n">${t('sum')}</th><th></th></tr>${c.files.map((f, i) => `<tr><td>${esc(f.name)}</td><td class="n">${f.count}</td><td class="n">${money(f.total)}</td><td><button class="link" data-act="dl" data-i="${i}">${t('dl')}</button></td></tr>`).join('')}</table><p style="margin-top:12px"><button class="btn" data-act="dlAll">${t('dlAll')}</button></p></section>`;
+    if (!S.created) return ''; const c = S.created, dir = S.month;
+    const who = c.by ? ` · by ${esc(c.by)}` : '', when = c.at ? ` · ${esc(c.at.slice(0, 16).replace('T', ' '))}` : '';
+    return `<section class="card"><div class="box ok"><h3>${t('done', esc((S.store.kind === 'folder' ? S.store.name + '/' : '') + dir + '/Accounting'))}</h3>${t('selfOk')}${c.added ? '<br>' + t('masterAdded', c.added) : ''}<div class="small muted">Created${when}${who}</div></div><table><tr><th>${t('file')}</th><th class="n">${t('people')}</th><th class="n">${t('sum')}</th><th></th></tr>${c.files.map((f, i) => `<tr><td>${esc(f.name)}</td><td class="n">${f.count}</td><td class="n">${money(f.total)}</td><td><button class="link" data-act="dl" data-i="${i}">${t('dl')}</button></td></tr>`).join('')}</table><p style="margin-top:12px"><button class="btn" data-act="dlAll">${t('dlAll')}</button></p></section>`;
   }
   function viewMaster() {
     const ids = Object.keys(S.master), q = S.mq.trim().toLowerCase(); const rows = ids.filter((id) => !q || id.includes(q) || (S.master[id].name || '').toLowerCase().includes(q) || (S.master[id].iban || '').toLowerCase().includes(q)).sort((a, b) => (S.master[a].name || '').localeCompare(S.master[b].name || ''));
@@ -242,18 +310,38 @@
   }
   async function viewHist() {
     const months = (await S.store.list('')).filter((n) => /^\d{4}-\d{2}$/.test(n)).sort().reverse(); const el = $('#hist'); if (!el) return;
-    if (!months.length) { el.innerHTML = `<p class="muted">${t('hEmpty')}</p>`; return; }
-    let h = '';
-    for (const mth of months) { const log = await readJson(mth + '/run.json', null); if (!log) continue;
-      h += `<details ${mth === months[0] ? 'open' : ''} style="margin-bottom:10px"><summary><b>${mth}</b> · ${money(log.grandTotal)} SAR · ${log.outputs.reduce((a, o) => a + o.count, 0)} ${t('people')} · Value date ${esc(log.valueDate)} · ${t('created')} ${esc(log.createdAt.slice(0, 16).replace('T', ' '))}</summary><table style="margin:8px 0 0"><tr><th>${t('out')}</th><th class="n">${t('people')}</th><th class="n">${t('sum')}</th><th>${t('file')}</th></tr>${log.outputs.map((o) => `<tr><td>${esc(o.label)}</td><td class="n">${o.count}</td><td class="n">${money(o.total)}</td><td><button class="link" data-act="hdl" data-p="${esc(mth + '/Accounting/' + o.fileName)}">${esc(o.fileName)}</button></td></tr>`).join('')}</table></details>`; }
-    el.innerHTML = h || `<p class="muted">${t('hEmpty')}</p>`;
+    const rows = [];
+    for (const mth of months) { const log = await readJson(mth + '/run.json', null), d = await readJson(mth + '/draft.json', null); if (!log && !d) continue; rows.push({ mth, log, d }); }
+    if (!rows.length) { el.innerHTML = `<p class="muted">${t('hEmpty')}</p>`; return; }
+    const nSel = rows.filter((r) => S.histSel[r.mth]).length;
+    let h = `<p class="hint">Click a month to open it in Monthly run. Tick months and press Delete to remove them from the shared folder (HR files, bank files and records of that month). The master list is not changed.</p>
+      <p><button class="btn" data-act="histDel" ${nSel ? '' : 'disabled'} style="${nSel ? 'border-color:var(--err);color:var(--err)' : ''}">Delete selected (${nSel})</button></p>
+      <table><tr><th style="width:28px"><input type="checkbox" data-act="histAll" ${nSel && nSel === rows.length ? 'checked' : ''}></th><th>Month</th><th>Status</th><th class="n">${t('people')}</th><th class="n">${t('sum')}</th><th>Value date</th><th>Last change</th></tr>`;
+    for (const { mth, log, d } of rows) {
+      const created = log || (d && d.created);
+      const status = log ? `<span class="tag ok">Created</span>` : `<span class="tag warn">In progress</span>`;
+      const ppl = log ? log.outputs.reduce((a, o) => a + o.count, 0) : '', tot = log ? money(log.grandTotal) : '';
+      const lc = d && d.by ? `${esc(d.by)} · ${esc((d.at || '').slice(0, 16).replace('T', ' '))}` : log ? `${esc(log.createdBy || '')} · ${esc(log.createdAt.slice(0, 16).replace('T', ' '))}` : '';
+      h += `<tr><td><input type="checkbox" data-act="histSel" data-m="${mth}" ${S.histSel[mth] ? 'checked' : ''}></td><td><button class="link" data-act="histOpen" data-m="${mth}"><b>${mth}</b></button>${S.live && S.live.month === mth ? ' <span class="tag new">team is here</span>' : ''}</td><td>${status}</td><td class="n">${ppl}</td><td class="n">${tot}</td><td class="mono">${esc((log && log.valueDate) || (d && d.valueDate) || '')}</td><td class="small">${lc}</td></tr>`;
+      if (log) h += `<tr><td></td><td colspan="6" class="small muted" style="padding-top:0">${log.outputs.map((o) => `<button class="link" data-act="hdl" data-p="${esc(mth + '/Accounting/' + o.fileName)}">${esc(o.label)}</button> ${o.count} · ${money(o.total)}`).join(' &nbsp;|&nbsp; ')}</td></tr>`;
+    }
+    el.innerHTML = h + '</table>';
+  }
+  async function deleteMonths(list) {
+    for (const m of list) { await S.store.remove(m); delete S.histSel[m]; }
+    for (const k of Object.keys(S.hrCache)) if (list.some((m) => k.startsWith(m + '/'))) delete S.hrCache[k];
+    const live = { month: S.month, rev: Date.now() + '-' + CLIENT, by: userName || 'Someone', client: CLIENT, at: new Date().toISOString(), deleted: list };
+    await writeJson('live.json', live); S.live = live;
+    if (list.includes(S.month)) await applyDraft(emptyDraft(S.month));
+    toast('Deleted: ' + list.join(', ')); render();
   }
   function viewHelp() {
     return `<section class="card"><h2>How it works</h2>
       <p><b>Rule:</b> amounts (salary, basic, housing, other, deduction) come from the HR file; name, bank code and IBAN come from the master list. People who are not in the master list are written from HR values and flagged.</p>
       <p><b>Template is preserved:</b> the macro, the Export button and the formatting of the bank template (.xls) stay byte-for-byte the same; only cell values change. The formulas in the salary column and in Total Salary are kept.</p>
       <p><b>Self-check:</b> every created file is read back and compared (people count, total, value date, IDs, IBANs). If anything differs, nothing is saved.</p>
-      <p><b>Storage layout:</b> in the shared folder: <code>templates/</code>, <code>master.json</code>, and per month <code>2026-11/HR</code>, <code>2026-11/Accounting</code>, <code>2026-11/run.json</code>.</p>
+      <p><b>Storage layout:</b> in the shared folder: <code>templates/</code>, <code>master.json</code>, and per month <code>2026-11/HR</code>, <code>2026-11/Accounting</code>, <code>2026-11/run.json</code>, <code>2026-11/draft.json</code> (the screen everyone shares) and <code>live.json</code> (which month the team is working on).</p>
+      <p><b>Working together:</b> every change (HR files, dates, choices) is saved to the shared folder at once; other screens check every 3 seconds and follow. Enter your name at the top so others see who changed what.</p>
       <p><b>Privacy:</b> payroll data stays in this browser and in the shared folder you choose. Nothing is sent to a server.</p><p class="muted small">v${VERSION}</p></section>`;
   }
 
@@ -264,11 +352,14 @@
     if (el.classList.contains('drop')) { if (ev.target.tagName !== 'INPUT') $('input', el).click(); return; }
     if (el.dataset.pick) { const inp = $(`input[data-file="${el.dataset.pick}"]`); inp.dataset.key = el.dataset.key || ''; inp.click(); return; }
     const a = el.dataset.act;
-    if (a === 'rmFile') { S.inputs.splice(+el.dataset.i, 1); S.created = null; recompute(); render(); }
-    else if (a === 'clearFiles') { S.inputs = []; S.overrides = {}; S.addNew = {}; S.ack = false; S.created = null; recompute(); render(); }
+    if (a === 'rmFile') { const fn = S.inputs[+el.dataset.i].fileName; await S.store.remove(S.month + '/HR/' + fn); await editDraft((d) => { d.inputs = d.inputs.filter((i) => i.fileName !== fn); d.created = null; }); }
+    else if (a === 'clearFiles') { if (!confirm(`Remove all HR files of ${S.month} for everyone?`)) return; await S.store.remove(S.month + '/HR'); await editDraft((d) => { d.inputs = []; d.overrides = {}; d.addNew = {}; d.ack = false; d.created = null; }); }
+    else if (a === 'histOpen') { S.tab = 'run'; await openMonth(el.dataset.m); S.viewingHist = true; render(); }
+    else if (a === 'goLive') { S.viewingHist = false; await openMonth(S.live.month); }
+    else if (a === 'histDel') { const list = Object.keys(S.histSel).filter((m) => S.histSel[m]).sort(); if (!list.length) return; if (!confirm(`Delete ${list.join(', ')} for the whole team?\n\nHR files, bank files and records of ${list.length === 1 ? 'this month' : 'these months'} will be removed from the shared folder. This cannot be undone.`)) return; await deleteMonths(list); }
     else if (a === 'create') { el.disabled = true; el.textContent = t('working'); await createFiles(); }
-    else if (a === 'dl') { const f = S.created.files[+el.dataset.i]; download(f.name, f.data, 'application/vnd.ms-excel'); }
-    else if (a === 'dlAll') download(`WPS_${S.created.dir}.zip`, X.zipStore(S.created.files.map((f) => ({ name: f.name, data: f.data }))), 'application/zip');
+    else if (a === 'dl') { const f = S.created.files[+el.dataset.i]; const u = await S.store.read(S.month + '/Accounting/' + f.name); if (u) download(f.name, u, 'application/vnd.ms-excel'); else toast('File not found in the shared folder.'); }
+    else if (a === 'dlAll') { const list = []; for (const f of S.created.files) { const u = await S.store.read(S.month + '/Accounting/' + f.name); if (u) list.push({ name: f.name, data: u }); } download(`WPS_${S.month}.zip`, X.zipStore(list), 'application/zip'); }
     else if (a === 'hdl') { const u = await S.store.read(el.dataset.p); if (u) download(el.dataset.p.split('/').pop(), u, 'application/vnd.ms-excel'); }
     else if (a === 'mExport') { const lines = ['ID,Name,Bank,IBAN'].concat(Object.keys(S.master).map((id) => [id, S.master[id].name, S.master[id].bank, S.master[id].iban].map((v) => '"' + String(v || '').replace(/"/g, '""') + '"').join(','))); download('master.csv', te.encode('﻿' + lines.join('\r\n')), 'text/csv'); }
     else if (a === 'expSave') { const v = $('#exp_path').value.trim(); const cur = await readJson('settings.json', {}); cur.exportPath = v; await writeJson('settings.json', cur); S.exportPath = v; toast('Export folder saved.'); render(); }
@@ -285,14 +376,17 @@
   document.addEventListener('change', async (ev) => {
     const el = ev.target, a = el.dataset.act;
     if (el.dataset.file) { const files = [...el.files]; const kind = el.dataset.file, key = el.dataset.key; el.value = ''; if (!files.length) return; if (kind === 'hr') await addHr(files); else if (kind === 'tpl') await addTemplates(files); else if (kind === 'tpl1') await addTemplates(files, key); else if (kind === 'master') await importMaster(files); return; }
-    if (a === 'setOut') { S.inputs[+el.dataset.i].output = el.value || null; S.created = null; recompute(); render(); }
-    else if (a === 'month') { if (!/^\d{4}-\d{2}$/.test(el.value)) return; S.month = el.value; await loadPrev(); recompute(); render(); }
-    else if (a === 'runDate') { S.runDate = el.value; const [y, m, d] = el.value.split('-').map(Number); if (y) { S.valueDate = W.valueDateFor(new Date(y, m - 1, d)); } render(); }
-    else if (a === 'valueDate') { S.valueDate = el.value.trim(); render(); }
-    else if (a === 'ov') { const id = el.dataset.id; S.overrides[id] = Object.assign({}, S.overrides[id], { [el.dataset.k]: el.value }); recompute(); render(); }
-    else if (a === 'useHr') { const id = el.dataset.id; S.overrides[id] = Object.assign({}, S.overrides[id], { useHr: el.value === '1' }); recompute(); render(); }
-    else if (a === 'addNew') { S.addNew[el.dataset.id] = el.checked; }
-    else if (a === 'ack') { S.ack = el.checked; render(); }
+    if (a === 'setOut') { const fn = S.inputs[+el.dataset.i].fileName, v = el.value || null; await editDraft((d) => { const e = d.inputs.find((i) => i.fileName === fn); if (e) e.output = v; d.created = null; }); }
+    else if (a === 'month') { if (!/^\d{4}-\d{2}$/.test(el.value)) return; S.viewingHist = S.live ? el.value !== S.live.month : false; await openMonth(el.value); }
+    else if (a === 'runDate') { const [y, m, dd] = el.value.split('-').map(Number); const vd = y ? W.valueDateFor(new Date(y, m - 1, dd)) : S.valueDate; await editDraft((d) => { d.runDate = el.value; d.valueDate = vd; }); }
+    else if (a === 'valueDate') { const v = el.value.trim(); await editDraft((d) => { d.valueDate = v; }); }
+    else if (a === 'ov') { const id = el.dataset.id, k = el.dataset.k, v = el.value; await editDraft((d) => { d.overrides[id] = Object.assign({}, d.overrides[id], { [k]: v }); }); }
+    else if (a === 'useHr') { const id = el.dataset.id, v = el.value === '1'; await editDraft((d) => { d.overrides[id] = Object.assign({}, d.overrides[id], { useHr: v }); }); }
+    else if (a === 'addNew') { const id = el.dataset.id, v = el.checked; await editDraft((d) => { d.addNew[id] = v; }); }
+    else if (a === 'ack') { const v = el.checked; await editDraft((d) => { d.ack = v; }); }
+    else if (a === 'histSel') { S.histSel[el.dataset.m] = el.checked; render(); }
+    else if (a === 'histAll') { const boxes = document.querySelectorAll('input[data-act="histSel"]'); boxes.forEach((b) => { S.histSel[b.dataset.m] = el.checked; }); render(); }
+    else if (a === 'userName') { userName = el.value.trim(); localStorage.setItem('wps.user', userName); toast(userName ? 'Name saved: ' + userName : 'Name cleared'); }
   });
   document.addEventListener('input', (ev) => { if (ev.target.dataset.act === 'mq') { S.mq = ev.target.value; const pos = ev.target.selectionStart; render(); const n = $('input[data-act="mq"]'); n.focus(); n.setSelectionRange(pos, pos); } });
   ['dragover', 'dragleave', 'drop'].forEach((type) => document.addEventListener(type, async (ev) => {
@@ -301,11 +395,15 @@
     if (type === 'drop') { const files = [...ev.dataTransfer.files]; if (z.dataset.drop === 'hr') await addHr(files); else await addTemplates(files); }
   }));
   $('#btnFolder').addEventListener('click', () => connectFolder(S.pendingHandle));
+  document.addEventListener('focusout', () => { if (S.pendingRender) setTimeout(() => { if (S.pendingRender) { S.pendingRender = false; safeRender(); } }, 50); });
 
   (async function init() {
     try { const h = window.showDirectoryPicker ? await idb.get('dirHandle') : null;
       if (h) { if ((await h.queryPermission({ mode: 'readwrite' })) === 'granted') S.store = folderStore(h); else S.pendingHandle = h; } } catch (e) { /* 저장된 폴더 없음 */ }
-    await loadShared(); recompute(); render();
+    await loadShared();
+    const live = await readJson('live.json', null); S.live = live;
+    await openMonth(live && live.month ? live.month : S.month);
     if (S.pendingHandle) toast(t('perm'));
+    setInterval(poll, 3000);
   })();
 })();
