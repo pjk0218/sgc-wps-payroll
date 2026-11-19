@@ -1,7 +1,7 @@
 /* app.js — 화면과 저장. 급여 데이터는 이 브라우저와 선택한 공유 폴더 밖으로 나가지 않는다(서버 전송 없음). */
 (function () {
   'use strict';
-  const X = window.XlsBin, W = window.Wps, VERSION = '1.1.1';
+  const X = window.XlsBin, W = window.Wps, VERSION = '1.2.0';
   const $ = (s, el) => (el || document).querySelector(s);
   const esc = (s) => String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -65,7 +65,7 @@
     S.master = await readJson('master.json', {});
     const st = await readJson('settings.json', {}); S.special = st.special || {}; S.exportPath = st.exportPath || '';
     S.templates = {};
-    for (const o of W.OUTPUTS) { const u = await S.store.read('templates/' + o.key + '.xls'); if (u) { try { S.templates[o.key] = tplInfo(u); } catch (e) { S.templates[o.key] = { error: e.message }; } } }
+    for (const o of W.OUTPUTS.filter((x) => !x.fs)) { const u = await S.store.read('templates/' + o.key + '.xls'); if (u) { try { S.templates[o.key] = tplInfo(u); } catch (e) { S.templates[o.key] = { error: e.message }; } } }
     await loadPrev();
   }
   function tplInfo(u8) { const sh = X.readXls(u8, W.SHEET), lay = W.layout(sh); return { bytes: u8, rows: W.readEmployees(sh, lay).employees.length, std: lay.macroStandard }; }
@@ -210,7 +210,7 @@
   async function createFiles() {
     const r = S.res, files = []; const dir = S.month;
     try {
-      for (const o of r.outputs) { const f = W.fill(S.templates[o.key].bytes, o, S.valueDate, { filePath: S.exportPath ? S.exportPath.replace(/\{month\}/gi, S.month) : '' }); files.push({ name: o.fileName, data: f.bytes, key: o.key, count: f.check.count, total: f.check.total }); }
+      for (const o of r.outputs) { const f = W.fill(S.templates[o.base].bytes, o, S.valueDate, { filePath: S.exportPath ? S.exportPath.replace(/\{month\}/gi, S.month) : '' }); files.push({ name: o.fileName, data: f.bytes, key: o.key, count: f.check.count, total: f.check.total }); }
       for (const f of files) await S.store.write(dir + '/Accounting/' + f.name, f.data);
       // 마스터 반영: 체크된 신규 인원, HR 계좌로 바꾸기로 한 사람
       const adds = [], upds = [];
@@ -267,14 +267,14 @@
     if (warns.length) h += `<div class="box warn"><h3>${t('warnTitle', warns.length)}</h3><ul>${warns.map((n) => `<li><b>${esc(outLabel(n.output))}</b> ${n.id ? esc(n.id) + ' ' + esc(n.name) + ' — ' : ''}${noticeText(n)}</li>`).join('')}</ul></div>`;
     h += `</section>`;
     // 결과
-    const missing = S.res.outputs.filter((o) => !S.templates[o.key] || !S.templates[o.key].bytes), grand = S.res.outputs.reduce((a, o) => a + o.total, 0);
+    const missing = S.res.outputs.filter((o) => !S.templates[o.base] || !S.templates[o.base].bytes), grand = S.res.outputs.reduce((a, o) => a + o.total, 0);
     h += `<section class="card"><h2><span class="step">4</span>${t('s4')}</h2><table><tr><th>${t('out')}</th><th class="n">${t('people')}</th><th class="n">${t('sum')}</th><th>${t('tpl')}</th><th>${t('vsPrev')}</th></tr>`;
     for (const o of S.res.outputs) {
-      const tp = S.templates[o.key]; const tag = !tp || !tp.bytes ? `<span class="tag err">${t('tplMissing')}</span>` : tp.std ? `<span class="tag ok">${t('tplOk')}</span>` : `<span class="tag warn">${t('tplOdd')}</span>`;
+      const tp = S.templates[o.base]; const tag = !tp || !tp.bytes ? `<span class="tag err">${t('tplMissing')}</span>` : tp.std ? `<span class="tag ok">${t('tplOk')}</span>` : `<span class="tag warn">${t('tplOdd')}</span>`;
       let cmp = `<span class="muted small">${t('noPrev')}</span>`; const p = S.prev && S.prev.outputs.find((x) => x.key === o.key);
       if (p) { const pid = new Set(p.people.map((x) => x.id)), cid = new Set(o.rows.map((x) => x.id)); const joined = o.rows.filter((x) => !pid.has(x.id)), left = p.people.filter((x) => !cid.has(x.id)); const dc = o.count - p.count, dt = o.total - p.total;
         cmp = `${dc >= 0 ? '+' : ''}${dc} · ${dt >= 0 ? '+' : ''}${money(dt)}` + (joined.length || left.length ? ` <details style="display:inline-block;vertical-align:top"><summary>${t('joined')} ${joined.length} / ${t('left')} ${left.length}</summary><div class="small">${joined.map((x) => '+ ' + esc(x.name)).concat(left.map((x) => '− ' + esc(x.name))).join('<br>')}</div></details>` : ''); }
-      h += `<tr><td><b>${esc(o.label)}</b><div class="small muted">${esc(o.fileName)}</div></td><td class="n">${o.count}</td><td class="n">${money(o.total)}</td><td>${tag}</td><td>${cmp}</td></tr>`;
+      h += `<tr${o.fs ? ' style="background:#fff8ec"' : ''}><td><b>${esc(o.label)}</b>${o.fs ? ' <span class="tag warn">separate payment</span>' : ''}<div class="small muted">${esc(o.fileName)}</div></td><td class="n">${o.count}</td><td class="n">${money(o.total)}</td><td>${tag}</td><td>${cmp}</td></tr>`;
     }
     h += `<tr><td><b>${t('grand')}</b></td><td class="n"><b>${S.res.outputs.reduce((a, o) => a + o.count, 0)}</b></td><td class="n total">${money(grand)}</td><td></td><td></td></tr></table>`;
     const hasErr = errs.length || diffs.some((n) => n.type === 'iban-diff'), vdOk = /^\d{8}$/.test(S.valueDate);
@@ -301,7 +301,7 @@
 
   function specialCard() {
     const rows = Object.entries(S.special);
-    const opts = W.OUTPUTS.map((o) => `<option value="${o.key}">${esc(o.label)}</option>`).join('');
+    const opts = W.OUTPUTS.filter((o) => !o.fs).map((o) => `<option value="${o.key}">${esc(o.label)}</option>`).join('');
     return `<section class="card"><h2>Always in a separate file</h2><p class="hint">People listed here always go to the chosen output file, whichever HR file they come from (for example the D360 bank person and the PDH trainee). Saved in the shared folder, not in the app code.</p>
       <table><tr><th>${t('id')}</th><th>${t('name')}</th><th>${t('out')}</th><th></th></tr>${rows.map(([id, k]) => `<tr><td class="mono">${esc(id)}</td><td>${esc((S.master[id] || {}).name || '')}</td><td>${esc(outLabel(k))}</td><td><button class="link" data-act="spDel" data-id="${esc(id)}">${t('del')}</button></td></tr>`).join('')}
       <tr><td><input class="cell mono" id="sp_id" maxlength="10" placeholder="10-digit ID" style="width:120px"></td><td></td><td><select id="sp_out">${opts}</select></td><td><button class="link" data-act="spAdd">Add</button></td></tr></table></section>`;
@@ -315,7 +315,7 @@
   }
   function viewTpl() {
     let h = exportPathCard() + `<section class="card"><h2>${t('tTitle')}</h2><p class="hint">${t('tHint')} <b>Use the accounting team's final bank files only, never the HR files.</b></p>${(S.tplMsg || []).length ? `<div class="box err"><h3>Some files were not registered</h3><ul>${S.tplMsg.map((m) => `<li>${esc(m)}</li>`).join('')}</ul></div>` : ''}<div class="drop" data-drop="tpl">${t('dropTpl')}<input type="file" multiple accept=".xls,.zip" class="hide" data-file="tpl"></div><table style="margin-top:14px"><tr><th>${t('out')}</th><th>${t('tpl')}</th><th class="n">${t('tPeople')}</th><th></th></tr>`;
-    for (const o of W.OUTPUTS) { const tp = S.templates[o.key]; h += `<tr><td><b>${esc(o.label)}</b></td><td>${!tp ? `<span class="tag err">${t('tplMissing')}</span>` : tp.error ? `<span class="tag err">${esc(tp.error)}</span>` : tp.std ? `<span class="tag ok">${t('tStd')}</span>` : `<span class="tag warn">${t('tplOdd')}</span><div class="small" style="max-width:520px;margin-top:4px">${t('tOddMsg')}</div>`}</td><td class="n">${tp && tp.bytes ? tp.rows : ''}</td><td><button class="link" data-pick="tpl1" data-key="${o.key}">${t('tUpload')}</button></td></tr>`; }
+    for (const o of W.OUTPUTS.filter((x) => !x.fs)) { const tp = S.templates[o.key]; h += `<tr><td><b>${esc(o.label)}</b></td><td>${!tp ? `<span class="tag err">${t('tplMissing')}</span>` : tp.error ? `<span class="tag err">${esc(tp.error)}</span>` : tp.std ? `<span class="tag ok">${t('tStd')}</span>` : `<span class="tag warn">${t('tplOdd')}</span><div class="small" style="max-width:520px;margin-top:4px">${t('tOddMsg')}</div>`}</td><td class="n">${tp && tp.bytes ? tp.rows : ''}</td><td><button class="link" data-pick="tpl1" data-key="${o.key}">${t('tUpload')}</button></td></tr>`; }
     return h + `</table><input type="file" accept=".xls" class="hide" data-file="tpl1"></section>`;
   }
   async function viewHist() {
@@ -351,6 +351,7 @@
       <p><b>Template is preserved:</b> the macro, the Export button and the formatting of the bank template (.xls) stay byte-for-byte the same; only cell values change. The formulas in the salary column and in Total Salary are kept.</p>
       <p><b>Self-check:</b> every created file is read back and compared (people count, total, value date, IDs, IBANs). If anything differs, nothing is saved.</p>
       <p><b>Storage layout:</b> in the shared folder: <code>templates/</code>, <code>master.json</code>, and per month <code>2026-11/HR</code>, <code>2026-11/Accounting</code>, <code>2026-11/run.json</code>, <code>2026-11/draft.json</code> (the screen everyone shares) and <code>live.json</code> (which month the team is working on).</p>
+      <p><b>Final salary:</b> rows whose Payment Description says "Final Settlement", "Final Salary" or "End of Service" (or a file whose name says so) are put automatically into a separate bank file per project, named "... -Final Salary.xls", with the description "Final Salary". Salary rows of the same person stay in the normal salary file.</p>
       <p><b>Working together:</b> every change (HR files, dates, choices) is saved to the shared folder at once; other screens check every 3 seconds and follow. Enter your name at the top so others see who changed what.</p>
       <p><b>Privacy:</b> payroll data stays in this browser and in the shared folder you choose. Nothing is sent to a server.</p><p class="muted small">v${VERSION}</p></section>`;
   }

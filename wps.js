@@ -16,6 +16,10 @@
     { key: 'pdh-trainee', no: '05.1', tag: 'PDH', tail: ' -Trainee', label: 'PDH – Trainee' },
     { key: 'lnic', no: '06', tag: 'LNIC', tail: '', label: 'LNIC' },
   ];
+  // 퇴직 정산(Final Salary): 급여와 같은 양식을 쓰되 별도 파일, 은행 설명은 'Final Salary'로 통일
+  for (const o of OUTPUTS.slice()) OUTPUTS.push({ key: o.key + '-fs', base: o.key, fs: true, no: o.no, tag: o.tag, tail: o.tail + ' -Final Salary', label: o.label + ' – Final Salary' });
+  const FS_RE = /final\s*settle?ment|final\s*salary|end\s*of\s*service/i;
+  const isFinalSettlement = (desc, fileName) => FS_RE.test(desc || '') || /final\s*settle?ment|final\s*salary/i.test(fileName || '');
   // 항상 별도 파일로 빼는 사람(사번 → 출력)은 코드에 두지 않고 공유 폴더 settings.json에 둔다 (개인 신분번호 공개 방지)
   const DEFAULT_SPECIAL = {};
   const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -95,7 +99,8 @@
       if (!inp.output) { note('error', 'file', null, null, `Choose the output file for "${inp.fileName}"`); continue; }
       let wrongMonth = 0;
       for (const e of inp.employees) {
-        const out = special[e.id] || inp.output; (groups[out] = groups[out] || []);
+        const forcedFs = /-fs$/.test(inp.output), fs = forcedFs || isFinalSettlement(e.desc, inp.fileName);
+        const out = (special[e.id] || inp.output.replace(/-fs$/, '')) + (fs ? '-fs' : ''); (groups[out] = groups[out] || []);
         const m = master[e.id], o = ov[e.id] || {}; const row = { id: e.id, src: inp.fileName, srcRow: e.row, inMaster: !!m };
         if (m) {
           const mn = String(m.name).trim(); row.name = mn.length > 35 ? shorten(clean(mn), 35) : mn; row.bank = clean(m.bank); row.iban = cleanIban(m.iban);
@@ -109,7 +114,7 @@
           if (e.name.length > 35 && o.name === undefined) note('info', 'name-short', out, e, `Name was longer than 35 characters and was shortened to "${row.name}"`);
         }
         for (const k of ['salary', 'basic', 'housing', 'other', 'deduction']) row[k] = e[k];
-        row.desc = desc; row.addr1 = e.addr1; row.addr2 = e.addr2; row.addr3 = e.addr3;
+        row.fs = fs; row.desc = fs ? 'Final Salary' : desc; row.addr1 = e.addr1; row.addr2 = e.addr2; row.addr3 = e.addr3;
         // 검증
         if (!/^\d{10}$/.test(e.id)) note('error', 'id', out, e, `ID is not a 10-digit number: "${e.id}"`);
         const ib = cleanIban(row.iban); if (!/^SA[0-9A-Z]{22}$/.test(ib)) note('error', 'iban', out, e, `IBAN is not 24 characters starting with SA: "${row.iban}"`);
@@ -121,14 +126,16 @@
         if (!(row.salary > 0)) note('warn', 'zero', out, e, `Salary amount is zero or negative (${row.salary})`);
         const calc = row.basic + row.housing + row.other - row.deduction, tr = Math.trunc(calc * 100 + 1e-7) / 100; if (Math.abs(tr - row.salary) > 0.005 && Math.abs(calc - row.salary) > 0.005) note('error', 'sum', out, e, `Salary amount ${row.salary} ≠ basic + housing + other − deduction ${r2(calc)} — the salary cell in the template is a formula, so Excel will change this value when it recalculates`);
         const tagOf = (k) => (OUTPUTS.find((x) => x.key === k) || {}).tag || k;
-        if (seen.has(e.id)) { const pv = seen.get(e.id); if (pv.out === out) note('error', 'dup', out, e, `Same ID appears twice in the same output file (${pv.file} / ${inp.fileName})`); else note('warn', 'dup-move', out, e, `Same person is in two projects — ${tagOf(pv.out)} ${r2(pv.salary)} SAR and ${tagOf(out)} ${r2(row.salary)} SAR. Normal if the person moved project; otherwise check for a double payment`); } else seen.set(e.id, { file: inp.fileName, out, salary: row.salary });
-        const dm = MONTHS.find((mm) => e.desc.toLowerCase().includes(mm.toLowerCase())); if (dm && dm.toLowerCase() !== monthName) wrongMonth++;
+        const baseOf = (k) => String(k).replace(/-fs$/, '');
+        if (seen.has(e.id) && seen.get(e.id).out !== out && baseOf(seen.get(e.id).out) === baseOf(out)) { const pv = seen.get(e.id), sal = pv.out.endsWith('-fs') ? row.salary : pv.salary, fsAmt = pv.out.endsWith('-fs') ? pv.salary : row.salary; note('info', 'fs-also', out, e, `Gets salary ${r2(sal)} SAR and a final salary ${r2(fsAmt)} SAR — they go into two separate bank files`); }
+        else if (seen.has(e.id)) { const pv = seen.get(e.id); if (pv.out === out) note('error', 'dup', out, e, `Same ID appears twice in the same output file (${pv.file} / ${inp.fileName})`); else note('warn', 'dup-move', out, e, `Same person is in two projects — ${tagOf(pv.out)} ${r2(pv.salary)} SAR and ${tagOf(out)} ${r2(row.salary)} SAR. Normal if the person moved project; otherwise check for a double payment`); } else seen.set(e.id, { file: inp.fileName, out, salary: row.salary });
+        const dm = fs ? null : MONTHS.find((mm) => e.desc.toLowerCase().includes(mm.toLowerCase())); if (dm && dm.toLowerCase() !== monthName) wrongMonth++;
         groups[out].push(row);
       }
       if (wrongMonth) note('warn', 'month', inp.output, null, `Payment description in "${inp.fileName}" is not ${MONTHS[opts.month - 1]} (${wrongMonth} rows). Check that this is not another month's file`);
       if (inp.header && typeof inp.header.total === 'number') { const s = r2(inp.employees.reduce((a, e) => a + e.salary, 0)); if (Math.abs(s - inp.header.total) > 0.05) note('warn', 'hr-total', inp.output, null, `Total Salary in the header of "${inp.fileName}" (${inp.header.total}) differs from the sum of rows (${s})`); }
     }
-    const outputs = OUTPUTS.filter((o) => groups[o.key]).map((o) => ({ key: o.key, label: o.label, rows: groups[o.key], count: groups[o.key].length, total: r2(groups[o.key].reduce((a, r) => a + r.salary, 0)), fileName: `${o.no} ★ BSF-WPS Conversion Tool (${o.tag})-${MONTHS[opts.month - 1]} ${opts.year}${o.tail}.xls` }));
+    const outputs = OUTPUTS.filter((o) => groups[o.key]).map((o) => ({ key: o.key, base: o.base || o.key, fs: !!o.fs, label: o.label, rows: groups[o.key], count: groups[o.key].length, total: r2(groups[o.key].reduce((a, r) => a + r.salary, 0)), fileName: `${o.no} ★ BSF-WPS Conversion Tool (${o.tag})-${MONTHS[opts.month - 1]} ${opts.year}${o.tail}.xls` }));
     return { outputs, notices, desc };
   }
   // 양식 + 행 → 완성 .xls (매크로 보존)
@@ -174,5 +181,5 @@
     for (let r = first; r <= lastRow; r++) lines.push([amt(g(r, 5)), pad(g(r, 4), 34), pad(g(r, 2), 35) + pad(g(r, 11), 35) + pad(g(r, 12), 35) + pad(g(r, 13), 35), pad(g(r, 3), 35), pad(g(r, 10), 35), '      ', amt(g(r, 6)), amt(g(r, 7)), amt(g(r, 8)), amt(g(r, 9)), pad(g(r, 1), 10), ' '.repeat(16), ' '.repeat(8), ' '.repeat(8)].join('\t'));
     lines.push('-'); return lines.join('\r\n') + '\r\n';
   }
-  return { SHEET, OUTPUTS, MONTHS, DEFAULT_SPECIAL, detectOutput, detectTemplate, layout, readEmployees, readMasterSheet, valueDateFor, build, fill, macroPreview, normId, clean, cleanIban, r2 };
+  return { isFinalSettlement, SHEET, OUTPUTS, MONTHS, DEFAULT_SPECIAL, detectOutput, detectTemplate, layout, readEmployees, readMasterSheet, valueDateFor, build, fill, macroPreview, normId, clean, cleanIban, r2 };
 });
