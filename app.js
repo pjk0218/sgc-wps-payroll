@@ -1,7 +1,7 @@
 /* app.js — 화면과 저장. 급여 데이터는 이 브라우저와 선택한 공유 폴더 밖으로 나가지 않는다(서버 전송 없음). */
 (function () {
   'use strict';
-  const X = window.XlsBin, W = window.Wps, VERSION = '1.2.1';
+  const X = window.XlsBin, W = window.Wps, VERSION = '1.2.2';
   const $ = (s, el) => (el || document).querySelector(s);
   const esc = (s) => String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -289,7 +289,7 @@
   function createdBox() {
     if (!S.created) return ''; const c = S.created, dir = S.month;
     const who = c.by ? ` · by ${esc(c.by)}` : '', when = c.at ? ` · ${esc(c.at.slice(0, 16).replace('T', ' '))}` : '';
-    return `<section class="card"><div class="box ok"><h3>${t('done', esc((S.store.kind === 'folder' ? S.store.name + '/' : '') + dir + '/Accounting'))}</h3>${t('selfOk')}${c.added ? '<br>' + t('masterAdded', c.added) : ''}<div class="small muted">Created${when}${who}</div></div><table><tr><th>${t('file')}</th><th class="n">${t('people')}</th><th class="n">${t('sum')}</th><th></th></tr>${c.files.map((f, i) => `<tr><td>${esc(f.name)}</td><td class="n">${f.count}</td><td class="n">${money(f.total)}</td><td><button class="link" data-act="dl" data-i="${i}">${t('dl')}</button></td></tr>`).join('')}</table><p style="margin-top:12px"><button class="btn" data-act="dlAll">${t('dlAll')}</button></p></section>`;
+    return `<section class="card"><div class="box ok"><h3>${t('done', esc((S.store.kind === 'folder' ? S.store.name + '/' : '') + dir + '/Accounting'))}</h3>${t('selfOk')}${c.added ? '<br>' + t('masterAdded', c.added) : ''}<div class="small muted">Created${when}${who}</div></div><table><tr><th>${t('file')}</th><th class="n">${t('people')}</th><th class="n">${t('sum')}</th><th></th></tr>${c.files.map((f, i) => `<tr><td>${esc(f.name)}</td><td class="n">${f.count}</td><td class="n">${money(f.total)}</td><td><button class="link" data-act="dl" data-i="${i}">${t('dl')}</button></td></tr>`).join('')}</table><p style="margin-top:12px"><button class="btn" data-act="dlAll">${t('dlAll')}</button></p><p class="small muted" style="margin-top:8px">Export button does not work in Excel? <button class="link" data-tab="help">See the 3 checks in How it works</button></p></section>`;
   }
   function viewMaster() {
     const ids = Object.keys(S.master), q = S.mq.trim().toLowerCase(); const rows = ids.filter((id) => !q || id.includes(q) || (S.master[id].name || '').toLowerCase().includes(q) || (S.master[id].iban || '').toLowerCase().includes(q)).sort((a, b) => (S.master[a].name || '').localeCompare(S.master[b].name || ''));
@@ -348,7 +348,17 @@
     toast('Deleted: ' + list.join(', ')); render();
   }
   function viewHelp() {
-    return `<section class="card"><h2>How it works</h2>
+    const m = S.month, expDir = (S.exportPath || 'Z:\\{month}\\Accounting').replace('{month}', m);
+    return `<section class="card" id="exportHelp"><h2>Export button does not work?</h2>
+      <p>The Export button is a macro. Excel blocks it when a red bar says <b>"Microsoft blocked macros because the source of this file is not trusted"</b>. Do these 3 checks in order.</p>
+      <ol style="line-height:1.7">
+        <li><b>Use a team PC (Faisal or Jassim), not JKPC.</b> The bank macro contains Arabic text and only runs on Windows set up like the bank expects. On JKPC it always fails, even with the original bank file.</li>
+        <li><b>Open the file from the shared folder, not from Downloads.</b> Close Excel, then open <code>${esc(expDir)}</code> in File Explorer and double-click the file there. Files in Downloads are always blocked.</li>
+        <li><b>Still blocked? Unblock the file.</b> Close Excel → right-click the file → <b>Properties</b> → at the bottom tick <b>Unblock</b> → <b>OK</b> → open the file again.</li>
+      </ol>
+      <p class="small muted">Unblock all files of the month at once: right-click the Start button → <b>Terminal</b> (or PowerShell), paste this line and press Enter:<br><code>Get-ChildItem "${esc(expDir)}" | Unblock-File</code></p>
+      <p class="small muted">After Export, the bank file <code>yyyymmdd-hhmm.txt</code> appears in the folder written in cell F18 (<code>${esc(expDir)}</code>). If the red bar comes back on a team PC every month, Excel's Trusted Locations on that PC must include <code>Z:\\</code> and <code>\\\\JKPC\\WPS Payroll\\</code> with "Allow Trusted Locations on my network" ticked — ask JK.</p></section>
+    <section class="card"><h2>How it works</h2>
       <p><b>Rule:</b> amounts (salary, basic, housing, other, deduction) come from the HR file; name, bank code and IBAN come from the master list. People who are not in the master list are written from HR values and flagged.</p>
       <p><b>Template is preserved:</b> the macro, the Export button and the formatting of the bank template (.xls) stay byte-for-byte the same; only cell values change. The formulas in the salary column and in Total Salary are kept.</p>
       <p><b>Self-check:</b> every created file is read back and compared (people count, total, value date, IDs, IBANs). If anything differs, nothing is saved.</p>
