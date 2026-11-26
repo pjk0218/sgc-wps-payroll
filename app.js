@@ -1,7 +1,7 @@
 /* app.js — 화면과 저장. 급여 데이터는 이 브라우저와 선택한 공유 폴더 밖으로 나가지 않는다(서버 전송 없음). */
 (function () {
   'use strict';
-  const X = window.XlsBin, W = window.Wps, VERSION = '1.2.0';
+  const X = window.XlsBin, W = window.Wps, VERSION = '1.2.1';
   const $ = (s, el) => (el || document).querySelector(s);
   const esc = (s) => String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -171,7 +171,9 @@
   }
   // 저장·불러오기는 한 번에 하나씩 (빠르게 연달아 바꿔도 서로 덮어쓰지 않게)
   let chain = Promise.resolve();
-  const serial = (fn) => { const r = chain.then(fn, fn); chain = r.catch(() => {}); return r; };
+  const withTimeout = (pr, ms, what) => Promise.race([pr, new Promise((_, rej) => setTimeout(() => rej(new Error(what + ' did not answer within ' + (ms / 1000) + ' s')), ms))]);
+  // 한 단계가 멈춰도(네트워크 끊김) 다음 작업이 영원히 막히지 않게 90초 후 체인을 풀어 줌
+  const serial = (fn) => { const r = chain.then(fn, fn); chain = withTimeout(r, 90000, 'A shared-folder step').catch(() => {}); return r; };
   const openMonth = (month) => serial(() => openMonthNow(month));
   async function openMonthNow(month) { S.hrCache = {}; const d = await readDraft(month); await applyDraft(d || emptyDraft(month)); }
   // 모든 변경은 '최신 draft를 다시 읽고 → 바꾸고 → 저장' (두 사람이 동시에 바꿔도 서로 지우지 않게)
@@ -409,12 +411,21 @@
   document.addEventListener('focusout', () => { if (S.pendingRender) setTimeout(() => { if (S.pendingRender) { S.pendingRender = false; safeRender(); } }, 50); });
 
   (async function init() {
-    try { const h = window.showDirectoryPicker ? await idb.get('dirHandle') : null;
-      if (h) { if ((await h.queryPermission({ mode: 'readwrite' })) === 'granted') S.store = folderStore(h); else S.pendingHandle = h; } } catch (e) { /* 저장된 폴더 없음 */ }
-    await loadShared();
-    const live = await readJson('live.json', null); S.live = live;
-    await openMonth(live && live.month ? live.month : S.month);
-    if (S.pendingHandle) toast(t('perm'));
+    try { render(); } catch (e) { console.error(e); }
+    let h = null;
+    try { h = window.showDirectoryPicker ? await withTimeout(idb.get('dirHandle'), 5000, 'Browser storage') : null;
+      if (h) { if ((await withTimeout(h.queryPermission({ mode: 'readwrite' }), 8000, 'The shared folder')) === 'granted') S.store = folderStore(h); else S.pendingHandle = h; } } catch (e) { console.error(e); if (h) S.pendingHandle = h; }
+    try {
+      await withTimeout(loadShared(), 30000, 'The shared folder');
+      const live = await withTimeout(readJson('live.json', null), 10000, 'The shared folder'); S.live = live;
+      await withTimeout(openMonth(live && live.month ? live.month : S.month), 60000, 'Loading this month');
+    } catch (e) {
+      console.error(e);
+      if (S.store.kind === 'folder') { S.pendingHandle = S.pendingHandle || h; S.store = localStore; }
+      S.connectMsg = 'Could not read the shared folder (' + (e && e.message || e) + '). Check that you are on the office Wi-Fi and that JKPC is on, then click Reconnect (top right) or press Ctrl+F5.';
+    }
+    try { render(); } catch (e) { console.error(e); document.querySelector('main').innerHTML = '<div class="box err">Screen error: ' + esc(e.message) + '. Press Ctrl+F5.</div>'; }
+    if (S.pendingHandle && !S.connectMsg) toast(t('perm'));
     setInterval(poll, 3000);
   })();
 })();
